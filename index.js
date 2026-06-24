@@ -205,6 +205,9 @@ client.on('messageCreate', async (message) => {
             case 'правила':
                 return sendTempEmbed(message, getRulesEmbed(args[0]));
 
+            case 'инфо':
+                return sendTempEmbed(message, createEmbed({ color: COLORS.info, title: msgs.info_title, description: msgs.info_desc.join('\n') }));
+
             case 'варн': {
                 if (!hasPermission(message.member, PermissionsBitField.Flags.BanMembers)) return sendError(message, 'Нет прав.');
                 if (!targetMember) return sendError(message, 'Укажите пользователя.');
