@@ -194,7 +194,21 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 client.on('messageCreate', async (message) => {
-    if (message.author.bot || !message.content.startsWith(prefix)) return;
+    if (message.author.bot) return;
+
+    // react to a specific GIF URL anywhere in the message
+    try {
+        const gifMatch = 'https://cdn.discordapp.com/attachments/1439315432698937665/1517449883693486170/image.gif';
+        if (message.content && message.content.includes(gifMatch)) {
+            // reply with emojis as requested
+            await message.channel.send('Ох ебать, это-же Кiкс! 😳🔥🤣');
+            return;
+        }
+    } catch (err) {
+        // ignore any errors while checking/reacting
+    }
+
+    if (!message.content.startsWith(prefix)) return;
 
     const args = message.content.slice(prefix.length).trim().split(/ +/);
     const command = args.shift().toLowerCase();
