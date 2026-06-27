@@ -1,5 +1,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField } = require('discord.js');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
+const play = require('play-dl');
 const msgs = require('./messages.json');
 const storage = require('./lib/storage');
 
@@ -24,9 +26,13 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildModeration
+        GatewayIntentBits.GuildModeration,
+        GatewayIntentBits.GuildVoiceStates
     ]
 });
+
+// store last search results per guild: guildId -> [{title, url}] 
+const searchResults = new Map();
 
 const createEmbed = ({ color = COLORS.info, title, description }) => {
     const embed = new EmbedBuilder().setColor(color);
@@ -34,6 +40,37 @@ const createEmbed = ({ color = COLORS.info, title, description }) => {
     if (description) embed.setDescription(description);
     return embed;
 };
+
+// Play a YouTube URL in the member's voice channel
+async function playTrackForMember(member, url, textChannel) {
+    try {
+        const voiceChannel = member.voice.channel;
+        if (!voiceChannel) return textChannel.send('You need to join a voice channel first.');
+
+        const connection = joinVoiceChannel({
+            channelId: voiceChannel.id,
+            guildId: voiceChannel.guild.id,
+            adapterCreator: voiceChannel.guild.voiceAdapterCreator
+        });
+
+        const player = createAudioPlayer();
+        const stream = await play.stream(url).catch(() => null);
+        if (!stream) return textChannel.send('Не удалось получить поток с YouTube.');
+
+        const resource = createAudioResource(stream.stream, { inputType: stream.type });
+        player.play(resource);
+        connection.subscribe(player);
+
+        player.on(AudioPlayerStatus.Idle, () => {
+            try { connection.destroy(); } catch (e) {}
+        });
+
+        return textChannel.send(`Воспроизвожу: ${url}`);
+    } catch (err) {
+        console.error('playTrackForMember error', err);
+        return textChannel.send('Ошибка при воспроизведении трека.');
+    }
+}
 
 const safeDelete = (item) => item?.delete?.().catch(() => {});
 
@@ -136,6 +173,13 @@ client.once('ready', async () => {
             description: 'Показать правила сервера (основные)'
         },
         {
+            name: 'плей',
+            description: 'Искать трек на YouTube и показать варианты',
+            options: [
+                { name: 'запрос', description: 'Ключевые слова для поиска', type: 3, required: true }
+            ]
+        },
+        {
             name: 'правилапост',
             description: 'Опубликовать (или обновить) пост с правилами',
             options: [
@@ -160,6 +204,23 @@ client.on('interactionCreate', async (interaction) => {
     const guildConfig = guildId ? storage.getGuildConfig(guildId) : null;
 
     try {
+        if (commandName === 'плей') {
+            const query = interaction.options.getString('запрос');
+            if (!query) return interaction.reply({ content: 'Укажите запрос для поиска.', ephemeral: true });
+
+            // perform search
+            const results = await play.search(query, { limit: 5 });
+            if (!results || !results.length) return interaction.reply({ content: 'Ничего не найдено.', ephemeral: true });
+
+            const list = results.map((r, i) => `${i + 1}. ${r.title || r.name}`).join('\n');
+            // store minimal info
+            const guildId = interaction.guildId || (interaction.guild && interaction.guild.id);
+            if (guildId) searchResults.set(guildId, results.map(r => ({ title: r.title || r.name, url: r.url || r.link || r.id })));
+
+            await interaction.reply({ content: `найдена\n${list}`, ephemeral: false });
+            return;
+        }
+
         if (commandName === 'правила') {
             const embed = createEmbed({ color: COLORS.rules, title: msgs.rules.main_title, description: msgs.rules.main_desc.join('\n') });
             return interaction.reply({ embeds: [embed] });
@@ -221,6 +282,33 @@ client.on('messageCreate', async (message) => {
 
             case 'инфо':
                 return sendTempEmbed(message, createEmbed({ color: COLORS.info, title: msgs.info_title, description: msgs.info_desc.join('\n') }));
+
+            case 'плей': {
+                const query = args.join(' ');
+                if (!query) return sendError(message, 'Укажите запрос для поиска.');
+
+                const results = await play.search(query, { limit: 5 }).catch(() => []);
+                if (!results || !results.length) return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: 'Ничего не найдено.' }));
+
+                const list = results.map((r, i) => `${i + 1}. ${r.title || r.name}`).join('\n');
+                searchResults.set(message.guild.id, results.map(r => ({ title: r.title || r.name, url: r.url || r.link || r.id })));
+
+                return sendTempEmbed(message, createEmbed({ color: COLORS.info, title: 'найдена', description: list }));
+            }
+
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5': {
+                const idx = Number(command) - 1;
+                const guildId = message.guild && message.guild.id;
+                const list = guildId ? searchResults.get(guildId) : null;
+                if (!list || !list[idx]) return sendError(message, 'Нет сохранённого результата для этой позиции.');
+
+                const url = list[idx].url;
+                return playTrackForMember(message.member, url, message.channel);
+            }
 
             case 'варн': {
                 if (!hasPermission(message.member, PermissionsBitField.Flags.BanMembers)) return sendError(message, 'Нет прав.');
