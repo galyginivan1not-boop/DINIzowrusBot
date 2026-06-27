@@ -53,7 +53,7 @@ async function searchYouTube(query) {
 }
 
 // Guild audio player and queue management
-const guildPlayers = new Map(); // guildId -> { connection, player, queue:[], index, looping (bool), volume: number, resource }
+const guildPlayers = new Map(); // guildId -> { connection, player, queue:[], index, looping (bool), volume: number, resource, playing: false }
 
 function createGuildState(guildId) {
     const state = {
@@ -63,13 +63,14 @@ function createGuildState(guildId) {
         index: 0,
         looping: false,
         volume: 0.5,
-        resource: null
+        resource: null,
+        playing: false
     };
 
     state.player.on(AudioPlayerStatus.Idle, async () => {
         try {
+            state.playing = false;
             if (state.looping) {
-                // replay current
                 await playCurrent(guildId);
                 return;
             }
@@ -78,13 +79,20 @@ function createGuildState(guildId) {
             if (state.index < state.queue.length) {
                 await playCurrent(guildId);
             } else {
-                // queue finished
                 try { state.connection.destroy(); } catch (e) {}
                 guildPlayers.delete(guildId);
             }
         } catch (err) {
             console.error('player idle handler error', err);
         }
+    });
+
+    state.player.on(AudioPlayerStatus.Playing, () => {
+        state.playing = true;
+    });
+
+    state.player.on(AudioPlayerStatus.Paused, () => {
+        state.playing = false;
     });
 
     return state;
@@ -107,21 +115,26 @@ async function playCurrent(guildId) {
     const track = state.queue[state.index];
     if (!track) return;
 
-    const stream = await play.stream(track.url).catch(() => null);
-    if (!stream) {
-        state.player.stop(true);
-        return;
-    }
+    try {
+        const stream = await play.stream(track.url);
+        if (!stream) {
+            state.player.stop(true);
+            return;
+        }
 
-    const resource = createAudioResource(stream.stream, { inputType: stream.type, inlineVolume: true });
-    resource.volume.setVolume(state.volume);
-    state.resource = resource;
-    state.player.play(resource);
-    try { state.connection.subscribe(state.player); } catch (e) {}
+        const resource = createAudioResource(stream.stream, { inputType: stream.type, inlineVolume: true });
+        resource.volume.setVolume(state.volume);
+        state.resource = resource;
+        state.player.play(resource);
+        try { state.connection.subscribe(state.player); } catch (e) {}
+    } catch (err) {
+        console.error('playCurrent error', err);
+        state.player.stop(true);
+    }
 }
 
 async function enqueueTrack(member, track, textChannel) {
-    if (!member.voice.channel) return textChannel.send('Войдите в голосовой канал 먼저.');
+    if (!member.voice.channel) return textChannel.send('Войдите в голосовой канал сначала.');
     const guildId = member.guild.id;
     let state = guildPlayers.get(guildId);
     if (!state) {
@@ -134,41 +147,42 @@ async function enqueueTrack(member, track, textChannel) {
 
     state.queue.push(track);
     const pos = state.queue.length;
-    textChannel.send(`Добавлено в очередь: ${track.title} (позиция ${pos})`);
+    await textChannel.send(`Добавлено в очередь: ${track.title} (позиция ${pos})`);
 
-    // if player is idle and this is the only track, start playing
-    if (state.player.state.status !== 'playing') {
+    if (!state.playing) {
         state.index = state.queue.length - 1;
         await playCurrent(guildId);
-        return textChannel.send(`Воспроизвожу: ${track.title}`);
+        if (state.playing) {
+            return textChannel.send(`Воспроизвожу: ${track.title}`);
+        }
     }
 }
 
 function pauseGuild(guildId, textChannel) {
     const state = guildPlayers.get(guildId);
-    if (!state) return textChannel.send('Нет активного воспроизведения.');
+    if (!state || !state.playing) return textChannel.send('Нет активного воспроизведения.');
     state.player.pause();
     return textChannel.send('Пауза.');
 }
 
 function resumeGuild(guildId, textChannel) {
     const state = guildPlayers.get(guildId);
-    if (!state) return textChannel.send('Нет активного воспроизведения.');
+    if (!state || !state.queue.length) return textChannel.send('Нет активного воспроизведения.');
     state.player.unpause();
     return textChannel.send('Возобновлено.');
 }
 
 function skipGuild(guildId, textChannel) {
     const state = guildPlayers.get(guildId);
-    if (!state) return textChannel.send('Нет активного воспроизведения.');
+    if (!state || !state.queue.length) return textChannel.send('Нет активного воспроизведения.');
     state.player.stop(true);
     return textChannel.send('Пропускаю.');
 }
 
 function prevGuild(guildId, textChannel) {
     const state = guildPlayers.get(guildId);
-    if (!state) return textChannel.send('Нет активного воспроизведения.');
-    if (state.index > 0) state.index -= 2; // because playCurrent increments
+    if (!state || !state.queue.length) return textChannel.send('Нет активного воспроизведения.');
+    if (state.index > 0) state.index -= 2;
     state.player.stop(true);
     return textChannel.send('Возвращаюсь к предыдущему.');
 }
@@ -305,6 +319,7 @@ client.once('ready', async () => {
             ]
         },
         { name: 'пауза', description: 'Пауза воспроизведения' },
+        { name: 'унпауза', description: 'Возобновить воспроизведение' },
         { name: 'луп', description: 'Переключить зацикливание трека' },
         { name: 'некст', description: 'Следующий трек' },
         { name: 'пред', description: 'Предыдущий трек' },
@@ -356,6 +371,12 @@ client.on('interactionCreate', async (interaction) => {
             const guildId = interaction.guildId;
             pauseGuild(guildId, interaction.channel);
             return interaction.reply({ content: 'Пауза.', ephemeral: true });
+        }
+
+        if (commandName === 'унпауза') {
+            const guildId = interaction.guildId;
+            resumeGuild(guildId, interaction.channel);
+            return interaction.reply({ content: 'Возобновлено.', ephemeral: true });
         }
 
         if (commandName === 'луп') {
@@ -483,6 +504,11 @@ client.on('messageCreate', async (message) => {
             case 'пауза': {
                 pauseGuild(message.guild.id, message.channel);
                 return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: 'Пауза.' }));
+            }
+
+            case 'унпауза': {
+                resumeGuild(message.guild.id, message.channel);
+                return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: 'Возобновлено.' }));
             }
 
             case 'луп': {
