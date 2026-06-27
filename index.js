@@ -41,35 +41,143 @@ const createEmbed = ({ color = COLORS.info, title, description }) => {
     return embed;
 };
 
-// Play a YouTube URL in the member's voice channel
-async function playTrackForMember(member, url, textChannel) {
-    try {
-        const voiceChannel = member.voice.channel;
-        if (!voiceChannel) return textChannel.send('You need to join a voice channel first.');
+// Guild audio player and queue management
+const guildPlayers = new Map(); // guildId -> { connection, player, queue:[], index, looping (bool), volume: number, resource }
 
-        const connection = joinVoiceChannel({
-            channelId: voiceChannel.id,
-            guildId: voiceChannel.guild.id,
-            adapterCreator: voiceChannel.guild.voiceAdapterCreator
-        });
+function createGuildState(guildId) {
+    const state = {
+        connection: null,
+        player: createAudioPlayer(),
+        queue: [],
+        index: 0,
+        looping: false,
+        volume: 0.5,
+        resource: null
+    };
 
-        const player = createAudioPlayer();
-        const stream = await play.stream(url).catch(() => null);
-        if (!stream) return textChannel.send('Не удалось получить поток с YouTube.');
+    state.player.on(AudioPlayerStatus.Idle, async () => {
+        try {
+            if (state.looping) {
+                // replay current
+                await playCurrent(guildId);
+                return;
+            }
 
-        const resource = createAudioResource(stream.stream, { inputType: stream.type });
-        player.play(resource);
-        connection.subscribe(player);
+            state.index++;
+            if (state.index < state.queue.length) {
+                await playCurrent(guildId);
+            } else {
+                // queue finished
+                try { state.connection.destroy(); } catch (e) {}
+                guildPlayers.delete(guildId);
+            }
+        } catch (err) {
+            console.error('player idle handler error', err);
+        }
+    });
 
-        player.on(AudioPlayerStatus.Idle, () => {
-            try { connection.destroy(); } catch (e) {}
-        });
+    return state;
+}
 
-        return textChannel.send(`Воспроизвожу: ${url}`);
-    } catch (err) {
-        console.error('playTrackForMember error', err);
-        return textChannel.send('Ошибка при воспроизведении трека.');
+async function ensureConnection(member) {
+    const voiceChannel = member.voice.channel;
+    if (!voiceChannel) return null;
+    const connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: voiceChannel.guild.id,
+        adapterCreator: voiceChannel.guild.voiceAdapterCreator
+    });
+    return connection;
+}
+
+async function playCurrent(guildId) {
+    const state = guildPlayers.get(guildId);
+    if (!state) return;
+    const track = state.queue[state.index];
+    if (!track) return;
+
+    const stream = await play.stream(track.url).catch(() => null);
+    if (!stream) {
+        state.player.stop(true);
+        return;
     }
+
+    const resource = createAudioResource(stream.stream, { inputType: stream.type, inlineVolume: true });
+    resource.volume.setVolume(state.volume);
+    state.resource = resource;
+    state.player.play(resource);
+    try { state.connection.subscribe(state.player); } catch (e) {}
+}
+
+async function enqueueTrack(member, track, textChannel) {
+    if (!member.voice.channel) return textChannel.send('Войдите в голосовой канал 먼저.');
+    const guildId = member.guild.id;
+    let state = guildPlayers.get(guildId);
+    if (!state) {
+        state = createGuildState(guildId);
+        const conn = await ensureConnection(member);
+        if (!conn) return textChannel.send('Не удалось подключиться к голосовому каналу.');
+        state.connection = conn;
+        guildPlayers.set(guildId, state);
+    }
+
+    state.queue.push(track);
+    const pos = state.queue.length;
+    textChannel.send(`Добавлено в очередь: ${track.title} (позиция ${pos})`);
+
+    // if player is idle and this is the only track, start playing
+    if (state.player.state.status !== 'playing') {
+        state.index = state.queue.length - 1;
+        await playCurrent(guildId);
+        return textChannel.send(`Воспроизвожу: ${track.title}`);
+    }
+}
+
+function pauseGuild(guildId, textChannel) {
+    const state = guildPlayers.get(guildId);
+    if (!state) return textChannel.send('Нет активного воспроизведения.');
+    state.player.pause();
+    return textChannel.send('Пауза.');
+}
+
+function resumeGuild(guildId, textChannel) {
+    const state = guildPlayers.get(guildId);
+    if (!state) return textChannel.send('Нет активного воспроизведения.');
+    state.player.unpause();
+    return textChannel.send('Возобновлено.');
+}
+
+function skipGuild(guildId, textChannel) {
+    const state = guildPlayers.get(guildId);
+    if (!state) return textChannel.send('Нет активного воспроизведения.');
+    state.player.stop(true);
+    return textChannel.send('Пропускаю.');
+}
+
+function prevGuild(guildId, textChannel) {
+    const state = guildPlayers.get(guildId);
+    if (!state) return textChannel.send('Нет активного воспроизведения.');
+    if (state.index > 0) state.index -= 2; // because playCurrent increments
+    state.player.stop(true);
+    return textChannel.send('Возвращаюсь к предыдущему.');
+}
+
+function stopGuild(guildId, textChannel) {
+    const state = guildPlayers.get(guildId);
+    if (!state) return textChannel.send('Нет активного воспроизведения.');
+    state.queue = [];
+    state.player.stop(true);
+    try { state.connection.destroy(); } catch (e) {}
+    guildPlayers.delete(guildId);
+    return textChannel.send('Остановлено и выход из голосового канала.');
+}
+
+function setVolumeGuild(guildId, volume, textChannel) {
+    const state = guildPlayers.get(guildId);
+    if (!state) return textChannel.send('Нет активного воспроизведения.');
+    state.volume = Math.max(0, Math.min(1, volume));
+    if (state.resource && state.resource.volume) state.resource.volume.setVolume(state.volume);
+    return textChannel.send(`Громкость установлена на ${Math.round(state.volume * 100)}%.`);
 }
 
 const safeDelete = (item) => item?.delete?.().catch(() => {});
@@ -185,7 +293,13 @@ client.once('ready', async () => {
             options: [
                 { name: 'канал', description: 'Канал для публикации', type: 7, required: false }
             ]
-        }
+        },
+        { name: 'пауза', description: 'Пауза воспроизведения' },
+        { name: 'луп', description: 'Переключить зацикливание трека' },
+        { name: 'некст', description: 'Следующий трек' },
+        { name: 'пред', description: 'Предыдущий трек' },
+        { name: 'стоп', description: 'Остановить воспроизведение и выйти из войса' },
+        { name: 'громкость', description: 'Установить громкость (1-100)', options: [{ name: 'значение', description: 'Значение громкости', type: 4, required: true }] }
     ];
 
     try {
@@ -219,6 +333,45 @@ client.on('interactionCreate', async (interaction) => {
 
             await interaction.reply({ content: `найдена\n${list}`, ephemeral: false });
             return;
+        }
+
+        if (commandName === 'пауза') {
+            const guildId = interaction.guildId;
+            pauseGuild(guildId, interaction.channel);
+            return interaction.reply({ content: 'Пауза.', ephemeral: true });
+        }
+
+        if (commandName === 'луп') {
+            const guildId = interaction.guildId;
+            const state = guildPlayers.get(guildId);
+            if (!state) return interaction.reply({ content: 'Нет активного воспроизведения.', ephemeral: true });
+            state.looping = !state.looping;
+            return interaction.reply({ content: `Loop: ${state.looping ? 'включен' : 'выключен'}`, ephemeral: true });
+        }
+
+        if (commandName === 'некст') {
+            const guildId = interaction.guildId;
+            skipGuild(guildId, interaction.channel);
+            return interaction.reply({ content: 'Пропускаю.', ephemeral: true });
+        }
+
+        if (commandName === 'пред') {
+            const guildId = interaction.guildId;
+            prevGuild(guildId, interaction.channel);
+            return interaction.reply({ content: 'Назад.', ephemeral: true });
+        }
+
+        if (commandName === 'стоп') {
+            const guildId = interaction.guildId;
+            stopGuild(guildId, interaction.channel);
+            return interaction.reply({ content: 'Остановлено.', ephemeral: true });
+        }
+
+        if (commandName === 'громкость') {
+            const val = interaction.options.getInteger('значение') || 50;
+            const guildId = interaction.guildId;
+            setVolumeGuild(guildId, Math.max(1, Math.min(100, val)) / 100, interaction.channel);
+            return interaction.reply({ content: `Громкость установлена на ${val}%`, ephemeral: true });
         }
 
         if (commandName === 'правила') {
@@ -306,8 +459,42 @@ client.on('messageCreate', async (message) => {
                 const list = guildId ? searchResults.get(guildId) : null;
                 if (!list || !list[idx]) return sendError(message, 'Нет сохранённого результата для этой позиции.');
 
-                const url = list[idx].url;
-                return playTrackForMember(message.member, url, message.channel);
+                const track = list[idx];
+                return enqueueTrack(message.member, { title: track.title, url: track.url }, message.channel);
+            }
+
+            case 'пауза': {
+                pauseGuild(message.guild.id, message.channel);
+                return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: 'Пауза.' }));
+            }
+
+            case 'луп': {
+                const state = guildPlayers.get(message.guild.id);
+                if (!state) return sendError(message, 'Нет активного воспроизведения.');
+                state.looping = !state.looping;
+                return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: `Loop: ${state.looping ? 'вкл' : 'выкл'}` }));
+            }
+
+            case 'некст': {
+                skipGuild(message.guild.id, message.channel);
+                return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: 'Пропущено.' }));
+            }
+
+            case 'пред': {
+                prevGuild(message.guild.id, message.channel);
+                return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: 'Предыдущий трек.' }));
+            }
+
+            case 'стоп': {
+                stopGuild(message.guild.id, message.channel);
+                return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: 'Остановлено и вышел из голосового канала.' }));
+            }
+
+            case 'громкость': {
+                const val = Number(args[0]);
+                if (!val || isNaN(val) || val < 1 || val > 100) return sendError(message, 'Укажите громкость от 1 до 100.');
+                setVolumeGuild(message.guild.id, Math.max(1, Math.min(100, val)) / 100, message.channel);
+                return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: `Громкость установлена на ${val}%` }));
             }
 
             case 'варн': {
