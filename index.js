@@ -2,6 +2,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
 const play = require('play-dl');
+const ytSearch = require('yt-search');
 const msgs = require('./messages.json');
 const storage = require('./lib/storage');
 
@@ -40,6 +41,16 @@ const createEmbed = ({ color = COLORS.info, title, description }) => {
     if (description) embed.setDescription(description);
     return embed;
 };
+
+async function searchYouTube(query) {
+    try {
+        const result = await ytSearch(query);
+        return (result && result.videos ? result.videos : []).slice(0, 5);
+    } catch (err) {
+        console.error('YouTube search error', err);
+        return [];
+    }
+}
 
 // Guild audio player and queue management
 const guildPlayers = new Map(); // guildId -> { connection, player, queue:[], index, looping (bool), volume: number, resource }
@@ -274,7 +285,6 @@ const getRulesEmbed = (arg) => {
 client.once('ready', async () => {
     console.log(`Бот ${client.user.tag} готов!`);
 
-    // Register basic slash commands (global)
     const commands = [
         {
             name: 'правила',
@@ -303,8 +313,16 @@ client.once('ready', async () => {
     ];
 
     try {
-        await client.application.commands.set(commands);
-        console.log('Slash commands registered');
+        if (process.env.GUILD_ID) {
+            const guild = client.guilds.cache.get(process.env.GUILD_ID) || await client.guilds.fetch(process.env.GUILD_ID).catch(() => null);
+            if (guild) {
+                await guild.commands.set(commands);
+                console.log('Slash commands registered for guild');
+            }
+        } else if (client.application) {
+            await client.application.commands.set(commands);
+            console.log('Slash commands registered globally');
+        }
     } catch (err) {
         console.error('Failed to register slash commands', err);
     }
@@ -323,13 +341,12 @@ client.on('interactionCreate', async (interaction) => {
             if (!query) return interaction.reply({ content: 'Укажите запрос для поиска.', ephemeral: true });
 
             // perform search
-            const results = await play.search(query, { limit: 5 });
+            const results = await searchYouTube(query);
             if (!results || !results.length) return interaction.reply({ content: 'Ничего не найдено.', ephemeral: true });
 
-            const list = results.map((r, i) => `${i + 1}. ${r.title || r.name}`).join('\n');
-            // store minimal info
+            const list = results.map((r, i) => `${i + 1}. ${r.title}`).join('\n');
             const guildId = interaction.guildId || (interaction.guild && interaction.guild.id);
-            if (guildId) searchResults.set(guildId, results.map(r => ({ title: r.title || r.name, url: r.url || r.link || r.id })));
+            if (guildId) searchResults.set(guildId, results.map(r => ({ title: r.title, url: r.url })));
 
             await interaction.reply({ content: `найдена\n${list}`, ephemeral: false });
             return;
@@ -440,11 +457,11 @@ client.on('messageCreate', async (message) => {
                 const query = args.join(' ');
                 if (!query) return sendError(message, 'Укажите запрос для поиска.');
 
-                const results = await play.search(query, { limit: 5 }).catch(() => []);
+                const results = await searchYouTube(query);
                 if (!results || !results.length) return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: 'Ничего не найдено.' }));
 
-                const list = results.map((r, i) => `${i + 1}. ${r.title || r.name}`).join('\n');
-                searchResults.set(message.guild.id, results.map(r => ({ title: r.title || r.name, url: r.url || r.link || r.id })));
+                const list = results.map((r, i) => `${i + 1}. ${r.title}`).join('\n');
+                searchResults.set(message.guild.id, results.map(r => ({ title: r.title, url: r.url })));
 
                 return sendTempEmbed(message, createEmbed({ color: COLORS.info, title: 'найдена', description: list }));
             }
