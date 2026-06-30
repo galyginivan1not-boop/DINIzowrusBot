@@ -540,6 +540,32 @@ client.on('messageCreate', async (message) => {
                 return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: `Громкость установлена на ${val}%` }));
             }
 
+            case 'ролл': {
+                const rangeInput = args[0];
+                let min = 1;
+                let max = 100;
+
+                if (rangeInput) {
+                    const parts = rangeInput.split('-').map(v => Number(v.trim()));
+                    if (parts.length === 2 && !Number.isNaN(parts[0]) && !Number.isNaN(parts[1]) && parts[0] <= parts[1]) {
+                        min = parts[0];
+                        max = parts[1];
+                    } else if (!Number.isNaN(Number(rangeInput))) {
+                        max = Number(rangeInput);
+                    } else {
+                        return sendError(message, 'Формат: ?ролл или ?ролл 1-100');
+                    }
+                }
+
+                const result = Math.floor(Math.random() * (max - min + 1)) + min;
+                return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: `🎲 Результат: **${result}**` }));
+            }
+
+            case 'монетка': {
+                const result = Math.random() < 0.5 ? 'Орёл' : 'Решка';
+                return sendTempEmbed(message, createEmbed({ color: COLORS.info, description: `🪙 ${result}` }));
+            }
+
             case 'варн': {
                 if (!hasPermission(message.member, PermissionsBitField.Flags.BanMembers)) return sendError(message, 'Нет прав.');
                 if (!targetMember) return sendError(message, 'Укажите пользователя.');
